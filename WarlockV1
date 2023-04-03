@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract BTCBetting {
+    address public owner;
+    uint256 public nextBetId;
+
+    struct BetInfo {
+        uint256 id;
+        uint256 futurePrice;
+        uint256 bettingEndTime;
+        bool betSettled;
+        uint256 totalYesAmount;
+        uint256 totalNoAmount;
+        uint256 referencePrice;
+        uint256 referenceTime; // Add this line
+    }
+
+    struct UserBet {
+        uint256 yesAmount;
+        uint256 noAmount;
+    }
+
+    //to get user bet info
+
+    struct UserBetInfo {
+        BetInfo bet;
+        UserBet userBet;
+    }
+
+    mapping(uint256 => BetInfo) public betInfo;
+    mapping(uint256 => mapping(address => UserBet)) public userBets;
+    mapping(address => uint256[]) private userBetIds; // Add this line
+    //multiple withdrawal
+    mapping(uint256 => mapping(address => bool)) public userHasWithdrawn;
+    mapping(uint256 => bool) public disabledBets;
+
+    event BetCreated(uint256 betId, uint256 bettingEndTime);
+    event BetPlaced(
+        uint256 betId,
+        address indexed user,
+        bool bet,
+        uint256 amount
+    );
+    event BetSettled(uint256 betId, uint256 futurePrice, bool result);
+    event BetWithdrawn(uint256 betId, address indexed user, uint256 payout);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function.");
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+        nextBetId = 1;
+    }
+
+    function createBet(
+        uint256 _bettingEndTime,
+        uint256 _referencePrice,
+        uint256 _referenceTime
+    ) external onlyOwner {
+        uint256 betId = nextBetId;
+        betInfo[betId] = BetInfo(
+            betId,
+            0,
+            _bettingEndTime,
+            false,
+            0,
+            0,
+            _referencePrice,
+            _referenceTime // Add this line
+        );
+        nextBetId++;
+
+        emit BetCreated(betId, _bettingEndTime);
+    }
+
+    function placeBet(uint256 _betId, bool _yesOrNo) external payable {
+        require(betInfo[_betId].id != 0, "Bet does not exist.");
+        require(!disabledBets[_betId], "Bet has been disabled.");
+        require(
+            block.timestamp < betInfo[_betId].bettingEndTime,
+            "Betting time has ended."
+        );
+        require(msg.value > 0, "Amount must be greater than 0.");
+
+        // Ensure the user has not already placed a bet on the other option
+        if (_yesOrNo) {
+            require(
+                userBets[_betId][msg.sender].noAmount == 0,
+                "You have already placed a bet on the other option."
+            );
+            userBets[_betId][msg.sender].yesAmount += msg.value;
+            betInfo[_betId].totalYesAmount += msg.value;
+        } else {
+            require(
+                userBets[_betId][msg.sender].yesAmount == 0,
+                "You have already placed a bet on the other option."
+            );
+            userBets[_betId][msg.sender].noAmount += msg.value;
+            betInfo[_betId].totalNoAmount += msg.value;
+        }
+
+        emit BetPlaced(_betId, msg.sender, _yesOrNo, msg.value);
+
+        userBetIds[msg.sender].push(_betId);
+    }
+
+    // function placeBet(uint256 _betId, bool _yesOrNo) external payable {
+    //     require(betInfo[_betId].id != 0, "Bet does not exist.");
+    //     require(
+    //         block.timestamp < betInfo[_betId].bettingEndTime,
+    //         "Betting time has ended."
+    //     );
+    //     require(msg.value > 0, "Amount must be greater than 0.");
+    //     if (_yesOrNo) {
+    //         userBets[_betId][msg.sender].yesAmount += msg.value;
+    //         betInfo[_betId].totalYesAmount += msg.value;
+    //     } else {
+    //         userBets[_betId][msg.sender].noAmount += msg.value;
+    //         betInfo[_betId].totalNoAmount += msg.value;
+    //     }
+
+    //     emit BetPlaced(_betId, msg.sender, _yesOrNo, msg.value);
+
+    //     // Check if the user has a referrer and the referral contract is set
+    //     if (
+    //         address(referralContract) != address(0) &&
+    //         referralContract.referrals(msg.sender) != address(0)
+    //     ) {
+    //         referralContract.addCommission(
+    //             referralContract.referrals(msg.sender),
+    //             msg.value
+    //         );
+    //     }
+
+    //     userBetIds[msg.sender].push(_betId); // Add this line
+    // }
+
+    function settleBet(uint256 _betId, uint256 _futurePrice)
+        external
+        onlyOwner
+    {
+        require(betInfo[_betId].id != 0, "Bet does not exist.");
+        require(
+            block.timestamp >= betInfo[_betId].bettingEndTime,
+            "Betting has not ended yet."
+        );
+        require(!betInfo[_betId].betSettled, "Bet has already been settled.");
+
+        betInfo[_betId].futurePrice = _futurePrice;
+        bool result = _futurePrice >= betInfo[_betId].referencePrice; // Replace 0 with the reference price
+        betInfo[_betId].betSettled = true;
+
+        emit BetSettled(_betId, _futurePrice, result);
+    }
+
+    function withdraw(uint256 _betId) external {
+        require(betInfo[_betId].id != 0, "Bet does not exist.");
+        require(betInfo[_betId].betSettled, "Bet has not been settled yet.");
+        require(
+            !userHasWithdrawn[_betId][msg.sender],
+            "Winnings already withdrawn."
+        );
+
+        bool result = betInfo[_betId].futurePrice >=
+            betInfo[_betId].referencePrice;
+        uint256 payout;
+
+        uint256 totalAmount = betInfo[_betId].totalYesAmount +
+            betInfo[_betId].totalNoAmount;
+
+        if (result && userBets[_betId][msg.sender].yesAmount > 0) {
+            uint256 userYesAmount = userBets[_betId][msg.sender].yesAmount;
+            uint256 totalYesAmount = betInfo[_betId].totalYesAmount;
+
+            payout = (userYesAmount * totalAmount) / totalYesAmount;
+            userBets[_betId][msg.sender].yesAmount = 0;
+        } else if (!result && userBets[_betId][msg.sender].noAmount > 0) {
+            uint256 userNoAmount = userBets[_betId][msg.sender].noAmount;
+            uint256 totalNoAmount = betInfo[_betId].totalNoAmount;
+
+            payout = (userNoAmount * totalAmount) / totalNoAmount;
+            userBets[_betId][msg.sender].noAmount = 0;
+        }
+
+        require(payout > 0, "No winnings to withdraw.");
+
+        uint256 platformFee = (payout * 3) / 100; // Calculate the 3% fee
+        uint256 userPayout = payout - platformFee; // Subtract the fee from the payout
+
+        payable(owner).transfer(platformFee); // Transfer the fee to the platform owner
+        payable(msg.sender).transfer(userPayout); // Transfer the remaining payout to the user
+
+        emit BetWithdrawn(_betId, msg.sender, userPayout);
+        userHasWithdrawn[_betId][msg.sender] = true;
+    }
+
+    function disableBet(uint256 _betId) external onlyOwner {
+        require(betInfo[_betId].id != 0, "Bet does not exist.");
+        require(!disabledBets[_betId], "Bet has already been disabled.");
+
+        disabledBets[_betId] = true;
+    }
+
+    function getAllBets() external view returns (BetInfo[] memory) {
+        uint256 betCount = nextBetId - 1;
+        BetInfo[] memory bets = new BetInfo[](betCount);
+
+        for (uint256 i = 0; i < betCount; i++) {
+            bets[i] = betInfo[i + 1];
+        }
+
+        return bets;
+    }
+
+    function getUserBets(address user)
+        external
+        view
+        returns (UserBetInfo[] memory)
+    {
+        uint256[] memory ids = userBetIds[user];
+        uint256 userBetCount = ids.length;
+        UserBetInfo[] memory userBetsArray = new UserBetInfo[](userBetCount);
+
+        for (uint256 i = 0; i < userBetCount; i++) {
+            uint256 betId = ids[i];
+            userBetsArray[i] = UserBetInfo({
+                bet: betInfo[betId],
+                userBet: userBets[betId][user]
+            });
+        }
+
+        return userBetsArray;
+    }
+
+    function isWinner(uint256 _betId, address user)
+        external
+        view
+        returns (bool)
+    {
+        require(betInfo[_betId].id != 0, "Bet does not exist.");
+        require(betInfo[_betId].betSettled, "Bet has not been settled yet.");
+
+        bool result = betInfo[_betId].futurePrice >=
+            betInfo[_betId].referencePrice;
+
+        // Check if the user has won the bet
+        if (
+            (result && userBets[_betId][user].yesAmount > 0) ||
+            (!result && userBets[_betId][user].noAmount > 0)
+        ) {
+            return true;
+        }
+
+        return false;
+    }
+
+    function isBetActive(BetInfo memory bet) private view returns (bool) {
+        return block.timestamp < bet.bettingEndTime && !bet.betSettled;
+    }
+
+    function getActiveBets() external view returns (BetInfo[] memory) {
+        uint256 betCount = nextBetId - 1;
+        uint256 activeBetCount = 0;
+
+        // Count active bets
+        for (uint256 i = 0; i < betCount; i++) {
+            if (isBetActive(betInfo[i + 1])) {
+                activeBetCount++;
+            }
+        }
+
+        BetInfo[] memory activeBets = new BetInfo[](activeBetCount);
+        uint256 index = 0;
+
+        // Populate active bets array
+        for (uint256 i = 0; i < betCount; i++) {
+            if (isBetActive(betInfo[i + 1])) {
+                activeBets[index] = betInfo[i + 1];
+                index++;
+            }
+        }
+
+        return activeBets;
+    }
+
+    function getLastBetId() external view returns (uint256) {
+        return nextBetId - 1;
+    }
+}
